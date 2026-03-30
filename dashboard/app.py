@@ -21,62 +21,54 @@ REPO_ROOT = SCRIPT_DIR.parent
 # ── Data Loading Function ──────────────────────────────────────────────────
 @st.cache_data
 def load_data() -> pd.DataFrame:
-    """Load and cache bird observation data."""
+    """Load and cache bird observation data with robust column checking."""
+    csv_path = SCRIPT_DIR / "bird_observations_clean.csv"
     
-    # Try multiple possible locations for the CSV
-    csv_candidates = [
-        REPO_ROOT / "bird_observations_clean.csv",
-        SCRIPT_DIR / "bird_observations_clean.csv",
-        Path("bird_observations_clean.csv"),
-        REPO_ROOT / "data" / "bird_observations_clean.csv",
-    ]
-    
-    csv_path = None
-    for candidate in csv_candidates:
-        if candidate.exists():
-            csv_path = candidate
-            break
-    
-    if csv_path and csv_path.exists():
-        try:
-            df = pd.read_csv(csv_path, parse_dates=["Observation_Date"])
+    if not csv_path.exists():
+        # Check parent if not in script dir
+        csv_path = REPO_ROOT / "bird_observations_clean.csv"
+
+    try:
+        # 1. Load the CSV without parsing dates first to avoid the crash
+        df = pd.read_csv(csv_path)
+        
+        # 2. Identify the date column (it might be named differently)
+        date_col = None
+        possible_date_cols = ["Observation_Date", "Date", "date", "OBS_DATE"]
+        
+        for col in possible_date_cols:
+            if col in df.columns:
+                date_col = col
+                break
+        
+        if date_col:
+            df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+            # Standardize the name to 'Observation_Date' for the rest of your app
+            if date_col != "Observation_Date":
+                df = df.rename(columns={date_col: "Observation_Date"})
+        else:
+            st.error(f"Could not find a date column. Available columns: {list(df.columns)}")
+            st.stop()
+
+        # 3. Add temporal features
+        df["Date"] = df["Observation_Date"]
+        df["Month"] = df["Observation_Date"].dt.month
+        df["Month_Name"] = df["Observation_Date"].dt.strftime("%b")
+        df["Year"] = df["Observation_Date"].dt.year.astype("Int64")
+        
+        # 4. Handle other expected columns safely
+        if "PIF_Watchlist_Status" not in df.columns:
+            df["PIF_Watchlist_Status"] = False
+        if "Regional_Stewardship_Status" not in df.columns:
+            df["Regional_Stewardship_Status"] = False
             
-            # Add temporal features if not present
-            if "Date" not in df.columns and "Observation_Date" in df.columns:
-                df["Date"] = df["Observation_Date"]
-            if "Month" not in df.columns and "Observation_Date" in df.columns:
-                df["Month"] = df["Observation_Date"].dt.month
-            if "Month_Name" not in df.columns and "Observation_Date" in df.columns:
-                df["Month_Name"] = df["Observation_Date"].dt.strftime("%b")
-            if "Season" not in df.columns and "Month" in df.columns:
-                df["Season"] = df["Month"].map(
-                    {12:"Winter",1:"Winter",2:"Winter",
-                     3:"Spring",4:"Spring",5:"Spring",
-                     6:"Summer",7:"Summer",8:"Summer",
-                     9:"Autumn",10:"Autumn",11:"Autumn"}
-                )
-            
-            if "Start_Time" in df.columns and "Start_Hour" not in df.columns:
-                df["Start_Hour"] = pd.to_datetime(
-                    df["Start_Time"].astype(str), format="%H:%M:%S", errors="coerce"
-                ).dt.hour
-            
-            if "Sky" in df.columns and "Sky_Clean" not in df.columns:
-                SKY_MAP = {"Clear or Few Clouds":"Clear","Partly Cloudy":"Partly Cloudy",
-                           "Cloudy/Overcast":"Overcast","Mist/Drizzle":"Mist/Drizzle",
-                           "Fog":"Fog","Rain":"Rain"}
-                df["Sky_Clean"] = df["Sky"].str.strip().map(SKY_MAP).fillna("Other")
-            
-            if "At_Risk" not in df.columns:
-                df["At_Risk"] = (
-                    (df.get("PIF_Watchlist_Status", False) == True) |
-                    (df.get("Regional_Stewardship_Status", False) == True)
-                )
-            
-            df["Year"] = df["Year"].astype("Int64")
-            return df
-        except Exception as e:
-            st.warning(f"Failed to load CSV: {e}")
+        df["At_Risk"] = (df["PIF_Watchlist_Status"] == True) | (df["Regional_Stewardship_Status"] == True)
+
+        return df
+
+    except Exception as e:
+        st.error(f"Critical Error loading data: {e}")
+        st.stop()
     
     # Fallback: build from Excel files
     import warnings
